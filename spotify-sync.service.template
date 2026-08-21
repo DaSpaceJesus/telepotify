@@ -1,0 +1,18 @@
+[Unit]
+Description=Automated Spotify Telegram Sync Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{USER}}
+WorkingDirectory={{WORKDIR}}
+ExecStart={{WORKDIR}}/venv/bin/python main.py
+Restart=always
+RestartSec=10
+EnvironmentFile={{WORKDIR}}/.env
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
