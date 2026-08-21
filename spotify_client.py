@@ -31,7 +31,13 @@ class SpotifySyncClient:
             cache_handler=cache_handler,
             open_browser=False  # Headless mode for Ubuntu Server
         )
-        self.sp = spotipy.Spotify(auth_manager=self.auth_manager)
+        self.sp = spotipy.Spotify(
+            auth_manager=self.auth_manager,
+            requests_timeout=25,
+            retries=5,
+            status_retries=5,
+            backoff_factor=0.5
+        )
         self._id_re = re.compile(r'^[a-zA-Z0-9]{15,30}$')
         self._secure_cache_file()
 
@@ -101,36 +107,43 @@ class SpotifySyncClient:
                 "url": f"https://open.spotify.com/track/{track_id}"
             }
 
-    def add_tracks(self, track_ids: List[str]) -> bool:
-        """Adds a list of track IDs to the target playlist in batches of 100."""
+    def add_tracks(self, track_ids: List[str], max_retries: int = 3) -> bool:
+        """Adds a list of track IDs to the target playlist in batches of 100 with automatic retry."""
         valid_ids = [tid for tid in track_ids if self._is_valid_id(tid)]
         if not valid_ids:
             return True
-        try:
-            uris = [f"spotify:track:{tid}" for tid in valid_ids]
-            # Batch in chunks of 100 (Spotify API limit)
-            for i in range(0, len(uris), 100):
-                chunk = uris[i:i+100]
-                self.sp.playlist_add_items(self.playlist_id, chunk)
-            return True
-        except Exception as e:
-            print(f"[SpotifyClient] Error adding tracks: {e}")
-            return False
+        uris = [f"spotify:track:{tid}" for tid in valid_ids]
+        for attempt in range(1, max_retries + 1):
+            try:
+                for i in range(0, len(uris), 100):
+                    chunk = uris[i:i+100]
+                    self.sp.playlist_add_items(self.playlist_id, chunk)
+                return True
+            except Exception as e:
+                print(f"[SpotifyClient] Attempt {attempt}/{max_retries} failed to add tracks: {e}")
+                if attempt < max_retries:
+                    import time
+                    time.sleep(1.0 * attempt)
+        return False
 
-    def remove_tracks(self, track_ids: List[str]) -> bool:
-        """Removes a list of track IDs from the target playlist."""
+    def remove_tracks(self, track_ids: List[str], max_retries: int = 3) -> bool:
+        """Removes a list of track IDs from the target playlist with automatic retry."""
         valid_ids = [tid for tid in track_ids if self._is_valid_id(tid)]
         if not valid_ids:
             return True
-        try:
-            uris = [f"spotify:track:{tid}" for tid in valid_ids]
-            for i in range(0, len(uris), 100):
-                chunk = uris[i:i+100]
-                self.sp.playlist_remove_all_occurrences_of_items(self.playlist_id, chunk)
-            return True
-        except Exception as e:
-            print(f"[SpotifyClient] Error removing tracks: {e}")
-            return False
+        uris = [f"spotify:track:{tid}" for tid in valid_ids]
+        for attempt in range(1, max_retries + 1):
+            try:
+                for i in range(0, len(uris), 100):
+                    chunk = uris[i:i+100]
+                    self.sp.playlist_remove_all_occurrences_of_items(self.playlist_id, chunk)
+                return True
+            except Exception as e:
+                print(f"[SpotifyClient] Attempt {attempt}/{max_retries} failed to remove tracks: {e}")
+                if attempt < max_retries:
+                    import time
+                    time.sleep(1.0 * attempt)
+        return False
 
     def get_album_info(self, album_id: str) -> Dict:
         """Fetches metadata and all track IDs for a Spotify album."""
