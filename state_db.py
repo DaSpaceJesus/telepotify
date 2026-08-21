@@ -6,22 +6,34 @@ Tracks synced tracks, deduplication state, and pending approval prompts.
 import sqlite3
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 
 class StateDB:
     def __init__(self, db_path: str = "sync_history.db"):
         self.db_path = db_path
         self._init_db()
+        self._secure_permissions()
+
+    def _secure_permissions(self):
+        """Enforces restrictive 0600 permissions on the SQLite database file."""
+        if os.path.exists(self.db_path):
+            try:
+                os.chmod(self.db_path, 0o600)
+            except OSError as e:
+                print(f"[StateDB] Warning: Could not set 0600 permissions on {self.db_path}: {e}")
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000;")
         return conn
 
     def _init_db(self):
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("PRAGMA journal_mode = WAL;")
+            cursor.execute("PRAGMA synchronous = NORMAL;")
             # Synced tracks table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tracks (
@@ -92,7 +104,7 @@ class StateDB:
         """Records a new track addition or marks an existing track as active."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             cursor.execute("""
                 INSERT INTO tracks (track_id, title, artist, album, artwork_url, added_at, source, is_active)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 1)
@@ -109,7 +121,7 @@ class StateDB:
         """Batch insert/update tracks."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             for t in tracks_data:
                 cursor.execute("""
                     INSERT INTO tracks (track_id, title, artist, album, artwork_url, added_at, source, is_active)
@@ -157,7 +169,7 @@ class StateDB:
         """Saves a pending confirmation prompt for an album or playlist."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             cursor.execute("""
                 INSERT INTO pending_approvals 
                 (approval_id, entity_type, entity_id, title, artist, track_count, track_ids_json, message_ids_json, created_at, status)

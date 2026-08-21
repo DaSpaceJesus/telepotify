@@ -5,6 +5,7 @@ Initializes database, Spotify client, file watcher, Telegram listener, and repor
 
 import os
 import sys
+import glob
 import asyncio
 import signal
 from dotenv import load_dotenv
@@ -17,10 +18,23 @@ from telegram_listener import TelegramChatListener
 
 load_dotenv()
 
+def secure_sensitive_files():
+    """Enforces restrictive 0600 permissions on sensitive credentials and databases."""
+    sensitive_patterns = [".env", ".cache-spotify", "*.db", "*.sqlite3", "*.session", "*.session-journal"]
+    for pattern in sensitive_patterns:
+        for file_path in glob.glob(pattern):
+            try:
+                os.chmod(file_path, 0o600)
+            except OSError:
+                pass
+
 async def main():
     print("==================================================")
     print("   Automated Spotify Playlist Sync Service")
     print("==================================================")
+
+    # 0. Enforce local credential security
+    secure_sensitive_files()
 
     # 1. Load Configurations
     telegram_api_id = os.getenv("TELEGRAM_API_ID")
@@ -40,7 +54,7 @@ async def main():
     links_file_path = os.getenv("LINKS_FILE_PATH", "spotify_links.txt")
     db_file_path = os.getenv("DB_FILE_PATH", "sync_history.db")
 
-    # Basic Validation
+    # Strict Validation
     if not all([telegram_api_id, telegram_api_hash, telegram_phone, telegram_target_chat]):
         print("[Error] Missing Telegram userbot credentials in .env!")
         sys.exit(1)
@@ -68,7 +82,25 @@ async def main():
         playlist_id=spotify_playlist_id
     )
 
-    # 4. Initial Sync & State Reconciliation
+    # 4. Initialize Telegram Reporter Bot
+    print("[Init] Initializing Telegram Reporter Bot...")
+    telegram_reporter = TelegramReporter(
+        bot_token=telegram_bot_token,
+        notify_chat_ids=notify_chat_ids,
+        state_db=state_db
+    )
+
+    # 5. Initialize File Watcher
+    print("[Init] Initializing File Watcher & 2-Way Sync Engine...")
+    file_watcher = PlaylistFileWatcher(
+        links_file_path=links_file_path,
+        spotify_client=spotify_client,
+        state_db=state_db,
+        telegram_reporter=telegram_reporter,
+        loop=loop
+    )
+
+    # 6. Initial Sync & State Reconciliation
     print("[Init] Checking current Spotify playlist state...")
     try:
         existing_playlist_ids = spotify_client.get_playlist_track_ids()
@@ -92,43 +124,16 @@ async def main():
             print(f"[Init] Indexed {len(batch_to_index)} existing playlist track(s) into database.")
 
         # Ensure spotify_links.txt contains all active playlist tracks
-        if os.path.exists(links_file_path):
-            with open(links_file_path, "r", encoding="utf-8") as f:
-                current_file_content = f.read()
-        else:
-            current_file_content = ""
-
-        missing_links = []
-        for tid in existing_playlist_ids:
-            if tid not in current_file_content:
-                missing_links.append(f"https://open.spotify.com/track/{tid}")
+        current_file_track_ids = set(file_watcher.extract_track_ids_from_file())
+        missing_links = [f"https://open.spotify.com/track/{tid}" for tid in existing_playlist_ids if tid not in current_file_track_ids]
 
         if missing_links:
-            with open(links_file_path, "a", encoding="utf-8") as f:
-                for ml in missing_links:
-                    f.write(f"{ml}\n")
+            file_watcher.append_links(missing_links)
             print(f"[Init] Added {len(missing_links)} existing track links to {links_file_path}.")
 
     except Exception as e:
         print(f"[Init] Warning during initial playlist check: {e}")
 
-    # 5. Initialize Telegram Reporter Bot
-    print("[Init] Initializing Telegram Reporter Bot...")
-    telegram_reporter = TelegramReporter(
-        bot_token=telegram_bot_token,
-        notify_chat_ids=notify_chat_ids,
-        state_db=state_db
-    )
-
-    # 6. Initialize File Watcher
-    print("[Init] Initializing File Watcher & 2-Way Sync Engine...")
-    file_watcher = PlaylistFileWatcher(
-        links_file_path=links_file_path,
-        spotify_client=spotify_client,
-        state_db=state_db,
-        telegram_reporter=telegram_reporter,
-        loop=loop
-    )
     file_watcher.start()
 
     # 7. Define Approval Callback for Albums/Playlists
@@ -155,6 +160,7 @@ async def main():
     )
 
     await listener.start()
+    secure_sensitive_files()
     print("\n[READY] Automated Spotify Sync Service is fully operational 24/7!")
     print("Listening for messages and watching file changes. Press Ctrl+C to stop.\n")
 
@@ -164,9 +170,11 @@ async def main():
     finally:
         file_watcher.stop()
         await telegram_reporter.close()
+        secure_sensitive_files()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("\n[Main] Service stopped gracefully.")
+

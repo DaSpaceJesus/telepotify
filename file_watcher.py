@@ -7,6 +7,7 @@ import os
 import re
 import time
 import asyncio
+import threading
 from typing import List, Set
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -22,10 +23,11 @@ class FileSyncHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if os.path.abspath(event.src_path) == self.target_file:
             current_time = time.time()
-            # Debounce rapid file writes (1.0s window)
-            if current_time - self.last_modified > 1.0:
+            # Debounce rapid file writes (0.5s window)
+            if current_time - self.last_modified > 0.5:
                 self.last_modified = current_time
-                asyncio.run_coroutine_threadsafe(self.callback(), self.loop)
+                if not self.loop.is_closed():
+                    asyncio.run_coroutine_threadsafe(self.callback(), self.loop)
 
 
 class PlaylistFileWatcher:
@@ -43,13 +45,19 @@ class PlaylistFileWatcher:
         self.telegram_reporter = telegram_reporter
         self.loop = loop
         self.observer = None
-        self._is_syncing = False
-        self._track_id_re = re.compile(r'track/([a-zA-Z0-9]+)|spotify:track:([a-zA-Z0-9]+)')
+        self._sync_lock = asyncio.Lock()
+        self._retrigger_sync = False
+        self._file_lock = threading.Lock()
+        self._track_id_re = re.compile(r'track/([a-zA-Z0-9]{15,30})|spotify:track:([a-zA-Z0-9]{15,30})')
 
-        # Ensure links file exists
+        # Ensure links file exists with appropriate permissions
         if not os.path.exists(self.links_file_path):
             with open(self.links_file_path, 'w', encoding='utf-8') as f:
                 pass
+        try:
+            os.chmod(self.links_file_path, 0o600)
+        except OSError:
+            pass
 
     def start(self):
         """Starts the watchdog file monitoring thread."""
@@ -72,31 +80,46 @@ class PlaylistFileWatcher:
         
         track_ids = []
         seen = set()
-        with open(self.links_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                m = self._track_id_re.search(line)
-                if m:
-                    tid = m.group(1) or m.group(2)
-                    if tid and tid not in seen:
-                        seen.add(tid)
-                        track_ids.append(tid)
+        with self._file_lock:
+            with open(self.links_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    m = self._track_id_re.search(line)
+                    if m:
+                        tid = m.group(1) or m.group(2)
+                        if tid and tid not in seen:
+                            seen.add(tid)
+                            track_ids.append(tid)
         return track_ids
 
     def append_links(self, urls: List[str]):
-        """Appends new Spotify links to the source file."""
-        with open(self.links_file_path, 'a', encoding='utf-8') as f:
-            for u in urls:
-                f.write(f"{u.strip()}\n")
+        """Thread-safely appends new Spotify links to the source file."""
+        if not urls:
+            return
+        with self._file_lock:
+            with open(self.links_file_path, 'a', encoding='utf-8') as f:
+                for u in urls:
+                    clean_u = u.strip()
+                    if clean_u:
+                        f.write(f"{clean_u}\n")
 
     async def sync_diff(self):
-        """Calculates differences between spotify_links.txt and Spotify playlist and syncs."""
-        if self._is_syncing:
+        """Thread-safe and race-condition free diff synchronization with re-trigger queue."""
+        if self._sync_lock.locked():
+            self._retrigger_sync = True
             return
-        self._is_syncing = True
 
+        async with self._sync_lock:
+            while True:
+                self._retrigger_sync = False
+                await self._execute_sync()
+                if not self._retrigger_sync:
+                    break
+
+    async def _execute_sync(self):
+        """Calculates differences between spotify_links.txt and Spotify playlist and syncs."""
         try:
             file_track_ids = self.extract_track_ids_from_file()
             db_active_ids = set(self.state_db.get_all_active_track_ids())
@@ -126,6 +149,7 @@ class PlaylistFileWatcher:
                         total = self.spotify_client.get_playlist_total()
                         print(f"[FileWatcher] Added: {track_info.get('artist')} - {track_info.get('title')}")
                         await self.telegram_reporter.send_track_added(track_info, total)
+                    await asyncio.sleep(0.05)
 
             # 2. Process Removals (2-Way Deletion)
             if to_remove:
@@ -138,8 +162,8 @@ class PlaylistFileWatcher:
                         total = self.spotify_client.get_playlist_total()
                         print(f"[FileWatcher] Removed: {track_info.get('artist')} - {track_info.get('title')}")
                         await self.telegram_reporter.send_track_removed(track_info, total)
+                    await asyncio.sleep(0.05)
 
         except Exception as e:
             print(f"[FileWatcher] Error during sync diff: {e}")
-        finally:
-            self._is_syncing = False
+

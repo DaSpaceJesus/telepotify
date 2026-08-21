@@ -4,8 +4,9 @@ Handles headless OAuth authentication, playlist inspection, and track management
 """
 
 import os
+import re
 import spotipy
-from spotipy.oauth2 import SpotifyOAuth
+from spotipy.oauth2 import SpotifyOAuth, CacheFileHandler
 from typing import List, Dict, Optional, Tuple
 
 class SpotifySyncClient:
@@ -17,18 +18,33 @@ class SpotifySyncClient:
         playlist_id: str,
         cache_path: str = ".cache-spotify"
     ):
-        self.playlist_id = playlist_id
+        self.playlist_id = str(playlist_id).strip()
+        self.cache_path = cache_path
         scope = "playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private"
         
+        cache_handler = CacheFileHandler(cache_path=cache_path)
         self.auth_manager = SpotifyOAuth(
             client_id=client_id,
             client_secret=client_secret,
             redirect_uri=redirect_uri,
             scope=scope,
-            cache_path=cache_path,
+            cache_handler=cache_handler,
             open_browser=False  # Headless mode for Ubuntu Server
         )
         self.sp = spotipy.Spotify(auth_manager=self.auth_manager)
+        self._id_re = re.compile(r'^[a-zA-Z0-9]{15,30}$')
+        self._secure_cache_file()
+
+    def _secure_cache_file(self):
+        """Enforces 0600 permissions on Spotify OAuth token cache file."""
+        if os.path.exists(self.cache_path):
+            try:
+                os.chmod(self.cache_path, 0o600)
+            except OSError as e:
+                print(f"[SpotifyClient] Warning: Could not set 0600 on {self.cache_path}: {e}")
+
+    def _is_valid_id(self, entity_id: str) -> bool:
+        return bool(entity_id and self._id_re.match(str(entity_id).strip()))
 
     def get_playlist_track_ids(self) -> List[str]:
         """Fetches all track IDs currently in the target Spotify playlist (handling pagination)."""
@@ -87,10 +103,11 @@ class SpotifySyncClient:
 
     def add_tracks(self, track_ids: List[str]) -> bool:
         """Adds a list of track IDs to the target playlist in batches of 100."""
-        if not track_ids:
+        valid_ids = [tid for tid in track_ids if self._is_valid_id(tid)]
+        if not valid_ids:
             return True
         try:
-            uris = [f"spotify:track:{tid}" for tid in track_ids]
+            uris = [f"spotify:track:{tid}" for tid in valid_ids]
             # Batch in chunks of 100 (Spotify API limit)
             for i in range(0, len(uris), 100):
                 chunk = uris[i:i+100]
@@ -102,10 +119,11 @@ class SpotifySyncClient:
 
     def remove_tracks(self, track_ids: List[str]) -> bool:
         """Removes a list of track IDs from the target playlist."""
-        if not track_ids:
+        valid_ids = [tid for tid in track_ids if self._is_valid_id(tid)]
+        if not valid_ids:
             return True
         try:
-            uris = [f"spotify:track:{tid}" for tid in track_ids]
+            uris = [f"spotify:track:{tid}" for tid in valid_ids]
             for i in range(0, len(uris), 100):
                 chunk = uris[i:i+100]
                 self.sp.playlist_remove_all_occurrences_of_items(self.playlist_id, chunk)

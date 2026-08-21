@@ -23,55 +23,109 @@ class TelegramChatListener:
         state_db,
         session_name: str = "telegram_userbot"
     ):
-        self.api_id = api_id
-        self.api_hash = api_hash
-        self.phone = phone
-        self.target_chat = target_chat
+        self.api_id = int(api_id)
+        self.api_hash = str(api_hash).strip()
+        self.phone = str(phone).strip()
+        self.target_chat_raw = str(target_chat).strip()
+        self.target_chat_clean_username = self.target_chat_raw.lstrip("@").lower()
+        self.session_name = session_name
         self.file_watcher = file_watcher
         self.spotify_client = spotify_client
         self.telegram_reporter = telegram_reporter
         self.state_db = state_db
         
-        self.client = TelegramClient(session_name, self.api_id, self.api_hash)
+        self.client = TelegramClient(self.session_name, self.api_id, self.api_hash)
+        self._target_entity = None
+        self._target_chat_ids = set()
 
-        # Regex Patterns
-        self.track_re = re.compile(r'https?://(?:open|play)\.spotify\.com/track/([a-zA-Z0-9]+)|spotify:track:([a-zA-Z0-9]+)')
-        self.album_re = re.compile(r'https?://(?:open|play)\.spotify\.com/album/([a-zA-Z0-9]+)')
-        self.playlist_re = re.compile(r'https?://(?:open|play)\.spotify\.com/playlist/([a-zA-Z0-9]+)')
+        # Build set of target ID representations if numeric
+        try:
+            numeric_id = int(self.target_chat_raw)
+            self._target_chat_ids.add(numeric_id)
+            self._target_chat_ids.add(str(numeric_id))
+            # Also handle channel/supergroup -100 prefix variations
+            if str(numeric_id).startswith("-100"):
+                stripped = int(str(numeric_id)[4:])
+                self._target_chat_ids.add(stripped)
+                self._target_chat_ids.add(str(stripped))
+            else:
+                prefixed = int(f"-100{abs(numeric_id)}")
+                self._target_chat_ids.add(prefixed)
+                self._target_chat_ids.add(str(prefixed))
+        except ValueError:
+            pass
+
+        # Regex Patterns (strictly bounded to prevent ReDoS / garbage matches)
+        self.track_re = re.compile(r'https?://(?:open|play)\.spotify\.com/track/([a-zA-Z0-9]{15,30})|spotify:track:([a-zA-Z0-9]{15,30})')
+        self.album_re = re.compile(r'https?://(?:open|play)\.spotify\.com/album/([a-zA-Z0-9]{15,30})')
+        self.playlist_re = re.compile(r'https?://(?:open|play)\.spotify\.com/playlist/([a-zA-Z0-9]{15,30})')
         self.non_spotify_re = re.compile(r'https?://(?:music\.apple\.com|youtu\.be|(?:www\.)?youtube\.com|soundcloud\.com)/[^\s]+')
+
+    def _secure_session_file(self):
+        """Enforces 0600 permissions on Telethon session file."""
+        session_file = f"{self.session_name}.session"
+        if os.path.exists(session_file):
+            try:
+                os.chmod(session_file, 0o600)
+            except OSError as e:
+                print(f"[TelegramListener] Warning: Could not set 0600 on {session_file}: {e}")
 
     async def start(self):
         """Starts the Telethon client and attaches message listeners."""
         print("[TelegramListener] Connecting to Telegram User Client...")
         await self.client.start(phone=self.phone)
+        self._secure_session_file()
         print("[TelegramListener] Logged in successfully!")
 
         # Resolve target chat entity
         try:
-            target_entity = await self.client.get_entity(self.target_chat)
-            target_id = target_entity.id
-            print(f"[TelegramListener] Monitoring chat: {getattr(target_entity, 'title', None) or getattr(target_entity, 'first_name', self.target_chat)} (ID: {target_id})")
+            lookup = int(self.target_chat_raw) if self.target_chat_raw.lstrip("-").isdigit() else self.target_chat_raw
+            self._target_entity = await self.client.get_entity(lookup)
+            if self._target_entity:
+                self._target_chat_ids.add(self._target_entity.id)
+                self._target_chat_ids.add(str(self._target_entity.id))
+                name = getattr(self._target_entity, 'title', None) or getattr(self._target_entity, 'first_name', self.target_chat_raw)
+                print(f"[TelegramListener] Strictly monitoring target chat: {name} (ID: {self._target_entity.id})")
         except Exception as e:
-            print(f"[TelegramListener] Warning: Could not resolve entity '{self.target_chat}' directly ({e}). Will match on chat incoming IDs.")
-            target_entity = None
+            print(f"[TelegramListener] Warning: Could not resolve entity '{self.target_chat_raw}' at init ({e}). Will enforce runtime chat ID filters.")
 
-        @self.client.on(events.NewMessage(chats=target_entity if target_entity else None))
+        @self.client.on(events.NewMessage(chats=self._target_entity if self._target_entity else None))
         async def handler(event):
-            # If target_entity wasn't resolved by object, check peer ID
-            if not target_entity:
-                chat = await event.get_chat()
-                chat_str = str(getattr(chat, 'id', ''))
-                user_name = str(getattr(chat, 'username', ''))
-                if self.target_chat not in (chat_str, user_name):
-                    return
+            if not await self._is_target_chat(event):
+                return
 
             message_text = event.raw_text or ""
-            if not message_text:
+            if not message_text.strip():
                 return
 
             await self._process_message(message_text)
 
         print("[TelegramListener] Listening for music links...")
+
+    async def _is_target_chat(self, event) -> bool:
+        """Strictly validates whether the event originated from the authorized target chat."""
+        if self._target_entity and event.chat_id == self._target_entity.id:
+            return True
+
+        if event.chat_id in self._target_chat_ids or str(event.chat_id) in self._target_chat_ids:
+            return True
+
+        try:
+            chat = await event.get_chat()
+            if not chat:
+                return False
+            
+            chat_id = getattr(chat, 'id', None)
+            if chat_id and (chat_id in self._target_chat_ids or str(chat_id) in self._target_chat_ids):
+                return True
+
+            username = getattr(chat, 'username', '')
+            if username and username.lower() == self.target_chat_clean_username:
+                return True
+        except Exception:
+            return False
+
+        return False
 
     async def run_until_disconnected(self):
         await self.client.run_until_disconnected()
@@ -81,10 +135,12 @@ class TelegramChatListener:
         track_matches = self.track_re.findall(text)
         if track_matches:
             new_urls_to_append = []
+            seen_in_msg = set()
             for m in track_matches:
                 track_id = m[0] or m[1]
-                if not track_id:
+                if not track_id or track_id in seen_in_msg:
                     continue
+                seen_in_msg.add(track_id)
 
                 # Check if duplicate
                 if self.state_db.is_track_synced(track_id):
@@ -124,6 +180,7 @@ class TelegramChatListener:
         # 4. Check for Non-Spotify Music link
         non_spotify_match = self.non_spotify_re.search(text)
         if non_spotify_match and not track_matches and not album_match and not playlist_match:
-            url = non_spotify_match.group(0)
-            print(f"[TelegramListener] Non-Spotify link detected: {url}")
-            await self.telegram_reporter.send_unsupported_link_alert(url)
+            raw_url = non_spotify_match.group(0).rstrip(".,!?;:)>'\"")
+            print(f"[TelegramListener] Non-Spotify link detected: {raw_url}")
+            await self.telegram_reporter.send_unsupported_link_alert(raw_url)
+

@@ -26,7 +26,10 @@ fi
 if [ ! -f "${DIR}/.env" ]; then
     echo "Warning: .env file not found! Copying from .env.example..."
     cp "${DIR}/.env.example" "${DIR}/.env"
+    chmod 600 "${DIR}/.env"
     echo "Please edit ${DIR}/.env with your real API credentials before starting the service."
+else
+    chmod 600 "${DIR}/.env"
 fi
 
 # Generate service unit file
