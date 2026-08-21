@@ -131,6 +131,26 @@ async def main():
             file_watcher.append_links(missing_links)
             print(f"[Init] Added {len(missing_links)} existing track links to {links_file_path}.")
 
+        # Ensure any tracks in spotify_links.txt not yet in Spotify playlist are added
+        tracks_to_add_to_spotify = [tid for tid in file_watcher.extract_track_ids_from_file() if tid not in set(existing_playlist_ids)]
+        if tracks_to_add_to_spotify:
+            print(f"[Init] Adding {len(tracks_to_add_to_spotify)} initial track(s) from {links_file_path} to Spotify playlist...")
+            spotify_client.add_tracks(tracks_to_add_to_spotify)
+            batch_added = []
+            for tid in tracks_to_add_to_spotify:
+                info = spotify_client.get_track_info(tid)
+                batch_added.append({
+                    "track_id": tid,
+                    "title": info.get("title", ""),
+                    "artist": info.get("artist", ""),
+                    "album": info.get("album", ""),
+                    "artwork_url": info.get("artwork_url", ""),
+                    "source": "initial_file_seed"
+                })
+            if batch_added:
+                state_db.record_tracks_batch(batch_added)
+            print(f"[Init] Successfully added and indexed {len(tracks_to_add_to_spotify)} track(s) to Spotify playlist.")
+
     except Exception as e:
         print(f"[Init] Warning during initial playlist check: {e}")
 
