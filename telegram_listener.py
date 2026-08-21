@@ -133,7 +133,7 @@ class TelegramChatListener:
         await self.client.run_until_disconnected()
 
     async def _resolve_short_url(self, url: str) -> str:
-        """Follows HTTP redirects for shortened Spotify URLs (e.g. open.spotify.com/s/..., spotify.link/...)."""
+        """Follows HTTP redirects and extracts canonical URLs for shortened Spotify links."""
         clean_url = url.rstrip(".,!?;:)>'\"")
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -144,6 +144,19 @@ class TelegramChatListener:
                 async with session.get(clean_url, allow_redirects=True) as resp:
                     if resp.status < 400:
                         resolved = str(resp.url)
+                        # If redirect gave a direct Spotify entity URL, return immediately
+                        if "/track/" in resolved or "/album/" in resolved or "/playlist/" in resolved:
+                            print(f"[TelegramListener] Resolved short link (302 redirect): {clean_url} -> {resolved}")
+                            return resolved
+
+                        # Fallback: Parse HTML meta tags (og:url / canonical) if Spotify returns an interstitial page
+                        html_body = await resp.text()
+                        og_match = re.search(r'(?:property|name)=["\'](?:og:url|twitter:url)["\']\s+content=["\']([^"\']+)["\']', html_body, re.IGNORECASE)
+                        if og_match and ("/track/" in og_match.group(1) or "/album/" in og_match.group(1) or "/playlist/" in og_match.group(1)):
+                            canonical_url = og_match.group(1)
+                            print(f"[TelegramListener] Resolved short link (HTML meta): {clean_url} -> {canonical_url}")
+                            return canonical_url
+
                         print(f"[TelegramListener] Resolved short link: {clean_url} -> {resolved}")
                         return resolved
         except Exception as e:
