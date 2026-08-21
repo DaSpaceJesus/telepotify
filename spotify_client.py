@@ -53,20 +53,23 @@ class SpotifySyncClient:
         return bool(entity_id and self._id_re.match(str(entity_id).strip()))
 
     def get_playlist_track_ids(self) -> List[str]:
-        """Fetches all track IDs currently in the target Spotify playlist (handling pagination)."""
+        """Fetches all track IDs currently in the target Spotify playlist (handling pagination and new/legacy API keys)."""
         track_ids = []
-        results = self.sp.playlist_items(self.playlist_id, fields="items.track.id,next", limit=100)
-        
-        while results:
-            for item in results.get("items", []):
-                track = item.get("track")
-                if track and track.get("id"):
-                    track_ids.append(track["id"])
-            if results.get("next"):
-                results = self.sp.next(results)
-            else:
-                break
-                
+        try:
+            results = self.sp.playlist_items(self.playlist_id, limit=100)
+            while results:
+                for entry in results.get("items", []):
+                    if not entry:
+                        continue
+                    track_obj = entry.get("item") or entry.get("track")
+                    if track_obj and isinstance(track_obj, dict) and track_obj.get("id"):
+                        track_ids.append(track_obj["id"])
+                if results.get("next"):
+                    results = self.sp.next(results)
+                else:
+                    break
+        except Exception as e:
+            print(f"[SpotifyClient] Error fetching playlist track IDs: {e}")
         return track_ids
 
     def get_playlist_total(self) -> int:
@@ -107,11 +110,18 @@ class SpotifySyncClient:
                 "url": f"https://open.spotify.com/track/{track_id}"
             }
 
-    def add_tracks(self, track_ids: List[str], max_retries: int = 3) -> bool:
-        """Adds a list of track IDs to the target playlist in batches of 100 with automatic retry."""
+    def add_tracks(self, track_ids: List[str], check_existing: bool = True, max_retries: int = 3) -> bool:
+        """Adds a list of track IDs to the target playlist in batches of 100 with strict deduplication."""
         valid_ids = [tid for tid in track_ids if self._is_valid_id(tid)]
         if not valid_ids:
             return True
+
+        if check_existing:
+            existing_ids = set(self.get_playlist_track_ids())
+            valid_ids = [tid for tid in valid_ids if tid not in existing_ids]
+            if not valid_ids:
+                return True
+
         uris = [f"spotify:track:{tid}" for tid in valid_ids]
         for attempt in range(1, max_retries + 1):
             try:
