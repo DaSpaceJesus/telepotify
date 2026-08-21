@@ -8,6 +8,7 @@ import re
 import time
 import asyncio
 import threading
+import requests
 from typing import List, Set
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -49,6 +50,7 @@ class PlaylistFileWatcher:
         self._retrigger_sync = False
         self._file_lock = threading.Lock()
         self._track_id_re = re.compile(r'track/([a-zA-Z0-9]{15,30})|spotify:track:([a-zA-Z0-9]{15,30})')
+        self._short_re = re.compile(r'https?://(?:open\.spotify\.com/s/|spotify\.link/|spotify\.app\.link/)[a-zA-Z0-9_-]+')
 
         # Ensure links file exists with appropriate permissions
         if not os.path.exists(self.links_file_path):
@@ -92,6 +94,24 @@ class PlaylistFileWatcher:
                         if tid and tid not in seen:
                             seen.add(tid)
                             track_ids.append(tid)
+                    else:
+                        short_m = self._short_re.search(line)
+                        if short_m:
+                            try:
+                                resp = requests.get(
+                                    short_m.group(0),
+                                    allow_redirects=True,
+                                    timeout=5,
+                                    headers={"User-Agent": "Mozilla/5.0"}
+                                )
+                                m2 = self._track_id_re.search(resp.url)
+                                if m2:
+                                    tid = m2.group(1) or m2.group(2)
+                                    if tid and tid not in seen:
+                                        seen.add(tid)
+                                        track_ids.append(tid)
+                            except Exception:
+                                pass
         return track_ids
 
     def append_links(self, urls: List[str]):

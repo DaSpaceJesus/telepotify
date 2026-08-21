@@ -7,6 +7,7 @@ import re
 import time
 import os
 import asyncio
+import aiohttp
 from telethon import TelegramClient, events
 from typing import List, Optional
 
@@ -59,6 +60,7 @@ class TelegramChatListener:
         self.track_re = re.compile(r'https?://(?:open|play)\.spotify\.com/track/([a-zA-Z0-9]{15,30})|spotify:track:([a-zA-Z0-9]{15,30})')
         self.album_re = re.compile(r'https?://(?:open|play)\.spotify\.com/album/([a-zA-Z0-9]{15,30})')
         self.playlist_re = re.compile(r'https?://(?:open|play)\.spotify\.com/playlist/([a-zA-Z0-9]{15,30})')
+        self.short_re = re.compile(r'https?://(?:open\.spotify\.com/s/|spotify\.link/|spotify\.app\.link/)[a-zA-Z0-9_-]+')
         self.non_spotify_re = re.compile(r'https?://(?:music\.apple\.com|youtu\.be|(?:www\.)?youtube\.com|soundcloud\.com)/[^\s]+')
 
     def _secure_session_file(self):
@@ -130,7 +132,32 @@ class TelegramChatListener:
     async def run_until_disconnected(self):
         await self.client.run_until_disconnected()
 
+    async def _resolve_short_url(self, url: str) -> str:
+        """Follows HTTP redirects for shortened Spotify URLs (e.g. open.spotify.com/s/..., spotify.link/...)."""
+        clean_url = url.rstrip(".,!?;:)>'\"")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        timeout = aiohttp.ClientTimeout(total=8)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.get(clean_url, allow_redirects=True) as resp:
+                    if resp.status < 400:
+                        resolved = str(resp.url)
+                        print(f"[TelegramListener] Resolved short link: {clean_url} -> {resolved}")
+                        return resolved
+        except Exception as e:
+            print(f"[TelegramListener] Warning: Failed to resolve short URL {clean_url}: {e}")
+        return clean_url
+
     async def _process_message(self, text: str):
+        # 0. Expand and resolve any Spotify short links (e.g. open.spotify.com/s/..., spotify.link/...)
+        short_matches = self.short_re.findall(text)
+        if short_matches:
+            resolved_urls = await asyncio.gather(*[self._resolve_short_url(u) for u in short_matches])
+            for short_u, resolved_u in zip(short_matches, resolved_urls):
+                text = text.replace(short_u, resolved_u)
+
         # 1. Check for single/multiple Spotify tracks
         track_matches = self.track_re.findall(text)
         if track_matches:
