@@ -283,10 +283,31 @@ class TelegramReporter:
         self._approval_callback = on_approval_callback
         self._polling_task = asyncio.create_task(self._poll_updates())
 
+    async def _register_bot_commands(self):
+        """Registers official slash commands menu in Telegram for autocompletion and the [Menu] button."""
+        session = await self.get_session()
+        commands = [
+            {"command": "status", "description": "📊 View sync status & playlist track count"},
+            {"command": "off", "description": "⏸️ Pause automatic sync"},
+            {"command": "on", "description": "▶️ Resume automatic sync"},
+            {"command": "help", "description": "❓ Show help guide & commands"}
+        ]
+        try:
+            payload = {"commands": commands}
+            async with session.post(f"{self.api_url}/setMyCommands", json=payload) as resp:
+                data = await resp.json()
+                if data.get("ok"):
+                    print("[Reporter] Registered official bot commands menu with Telegram.")
+        except Exception as e:
+            print(f"[Reporter] Warning: Could not register bot commands: {self._redact(str(e))}")
+
     async def _poll_updates(self):
         offset = 0
         session = await self.get_session()
         print("[Reporter] Started Telegram command & button callback listener with authorization enforcement...")
+        
+        # Register official menu commands in Telegram UI
+        await self._register_bot_commands()
         
         while True:
             try:
