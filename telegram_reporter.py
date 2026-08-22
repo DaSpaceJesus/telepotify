@@ -11,12 +11,13 @@ import re
 from typing import List, Dict, Optional, Callable
 
 class TelegramReporter:
-    def __init__(self, bot_token: str, notify_chat_ids: List[str], state_db):
+    def __init__(self, bot_token: str, notify_chat_ids: List[str], state_db, spotify_client=None):
         self.bot_token = bot_token.strip() if bot_token else ""
         # Store authorized chat IDs as clean string set for O(1) authorization checks
         self.notify_chat_ids = [str(cid).strip() for cid in notify_chat_ids if str(cid).strip()]
         self._authorized_ids = set(self.notify_chat_ids)
         self.state_db = state_db
+        self.spotify_client = spotify_client
         self.api_url = f"https://api.telegram.org/bot{self.bot_token}"
         self._session: Optional[aiohttp.ClientSession] = None
         self._polling_task: Optional[asyncio.Task] = None
@@ -285,14 +286,14 @@ class TelegramReporter:
     async def _poll_updates(self):
         offset = 0
         session = await self.get_session()
-        print("[Reporter] Started Telegram button callback listener with authorization enforcement...")
+        print("[Reporter] Started Telegram command & button callback listener with authorization enforcement...")
         
         while True:
             try:
                 params = {
                     "offset": offset,
                     "timeout": 20,
-                    "allowed_updates": json.dumps(["callback_query"])
+                    "allowed_updates": json.dumps(["callback_query", "message"])
                 }
                 timeout = aiohttp.ClientTimeout(total=30)
                 async with session.get(f"{self.api_url}/getUpdates", params=params, timeout=timeout) as resp:
@@ -302,6 +303,8 @@ class TelegramReporter:
                             offset = update["update_id"] + 1
                             if "callback_query" in update:
                                 await self._handle_callback_query(update["callback_query"])
+                            elif "message" in update:
+                                await self._handle_bot_command(update["message"])
                     elif resp.status == 409:
                         print("[Reporter] Warning: getUpdates conflict (another instance or webhook active). Backing off 5s...")
                         await asyncio.sleep(5)
@@ -316,6 +319,84 @@ class TelegramReporter:
             except Exception as e:
                 print(f"[Reporter] Polling error: {self._redact(str(e))}")
                 await asyncio.sleep(3)
+
+    async def _handle_bot_command(self, message: Dict):
+        """Processes incoming slash commands sent to @telepotifybot with strict user authorization."""
+        sender = message.get("from", {})
+        sender_id = str(sender.get("id", "")).strip()
+        sender_name = sender.get("first_name", "User")
+        chat_id = str(message.get("chat", {}).get("id", "")).strip()
+        text = str(message.get("text", "")).strip()
+
+        if not text.startswith("/"):
+            return
+
+        # --- SECURITY CHECK: Enforce User Authorization (Only Kasra & Anna) ---
+        if not sender_id or sender_id not in self._authorized_ids:
+            print(f"[Reporter] ⛔ Security: Unauthorized command attempt blocked from user ID {sender_id} ({sender_name})")
+            await self._send_text(chat_id, "⛔ <b>Access Denied</b>\nYou are not authorized to manage Telepotify.")
+            return
+
+        cmd = text.split()[0].lower().split("@")[0]
+        escaped_name = html.escape(str(sender_name), quote=True)
+
+        if cmd in ("/off", "/pause", "/stop"):
+            self.state_db.set_sync_enabled(False)
+            print(f"[Reporter] ⏸️ Sync paused by {sender_name} ({sender_id})")
+            alert_text = (
+                f"⏸️ <b>Telepotify Paused</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Auto-sync has been paused by <b>{escaped_name}</b>.\n"
+                f"New music links sent in chat will not be added to Spotify.\n\n"
+                f"<i>Send /on or /resume to resume syncing anytime.</i>"
+            )
+            for cid in self.notify_chat_ids:
+                await self._send_text(cid, alert_text)
+
+        elif cmd in ("/on", "/resume"):
+            self.state_db.set_sync_enabled(True)
+            print(f"[Reporter] ▶️ Sync resumed by {sender_name} ({sender_id})")
+            alert_text = (
+                f"▶️ <b>Telepotify Active</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Auto-sync has been resumed by <b>{escaped_name}</b>.\n"
+                f"Music links sent in your chat will now be automatically synchronized!"
+            )
+            for cid in self.notify_chat_ids:
+                await self._send_text(cid, alert_text)
+
+        elif cmd in ("/status", "/info"):
+            is_enabled = self.state_db.is_sync_enabled()
+            status_badge = "🟢 <b>Active (Syncing ON)</b>" if is_enabled else "🔴 <b>Paused (Syncing OFF)</b>"
+            total = self.spotify_client.get_playlist_total() if self.spotify_client else self.state_db.get_total_active_count()
+            status_text = (
+                f"📊 <b>Telepotify Status</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• <b>Status:</b> {status_badge}\n"
+                f"• <b>Tracks in Playlist:</b> {total}\n"
+                f"• <b>Authorized Admins:</b> You & Anna\n\n"
+                f"⚙️ <b>Commands:</b>\n"
+                f"• /on — Enable auto-sync\n"
+                f"• /off — Pause auto-sync\n"
+                f"• /status — View sync status\n"
+                f"• /help — Show help menu"
+            )
+            await self._send_text(chat_id, status_text)
+
+        elif cmd in ("/start", "/help"):
+            is_enabled = self.state_db.is_sync_enabled()
+            status_badge = "🟢 Active" if is_enabled else "🔴 Paused"
+            help_text = (
+                f"👋 <b>Hello, {escaped_name}!</b>\n\n"
+                f"I automatically synchronize Spotify music links between you and Anna.\n\n"
+                f"📊 <b>Current Status:</b> {status_badge}\n\n"
+                f"⚙️ <b>Commands:</b>\n"
+                f"• /status — Check live sync status & track count\n"
+                f"• /off — Temporarily pause auto-sync\n"
+                f"• /on — Resume auto-sync\n"
+                f"• /help — Show this help menu"
+            )
+            await self._send_text(chat_id, help_text)
 
     async def _handle_callback_query(self, query: Dict):
         session = await self.get_session()

@@ -87,7 +87,8 @@ async def main():
     telegram_reporter = TelegramReporter(
         bot_token=telegram_bot_token,
         notify_chat_ids=notify_chat_ids,
-        state_db=state_db
+        state_db=state_db,
+        spotify_client=spotify_client
     )
 
     # 5. Initialize File Watcher

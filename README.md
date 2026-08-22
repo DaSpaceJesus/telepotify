@@ -274,6 +274,21 @@ sudo systemctl start spotify-sync
 
 ---
 
+## 🤖 Interactive Telegram Commands
+
+Telepotify includes built-in admin controls directly in Telegram. Commands can be sent in your **private DM with `@telepotifybot`** or inside your **chat with Anna**:
+
+> 🔒 **Security Notice**: Commands are strictly protected. Only authorized user IDs defined in `TELEGRAM_NOTIFY_CHAT_IDS` (you and Anna) have permission to run these commands. Any unauthorized attempts are blocked and logged.
+
+| Command | Action | Description |
+| :--- | :--- | :--- |
+| **`/on`** or **`/resume`** | ▶️ **Resume Sync** | Enables auto-sync. Any music links sent in chat will automatically be added to Spotify. |
+| **`/off`** or **`/pause`** | ⏸️ **Pause Sync** | Pauses auto-sync. Music links sent while paused will be ignored until resumed. |
+| **`/status`** or **`/info`** | 📊 **Check Status** | Shows whether sync is Active/Paused, current Spotify playlist track count, and admin status. |
+| **`/help`** or **`/start`** | ❓ **Help Menu** | Displays the welcome guide and list of available commands. |
+
+---
+
 ## 📊 Managing the Service
 
 | Action | Command |

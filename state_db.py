@@ -63,6 +63,13 @@ class StateDB:
                     resolved_by TEXT
                 )
             """)
+            # Key-value settings table (for sync toggle on/off, etc.)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
             conn.commit()
 
     # --- Tracks Operations ---
@@ -211,3 +218,28 @@ class StateDB:
             """, (status, resolved_by, approval_id))
             conn.commit()
             return cursor.rowcount > 0
+
+    # --- Settings Operations (Sync Toggle ON/OFF) ---
+
+    def set_setting(self, key: str, value: str):
+        """Sets a persistent configuration key-value pair."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+            conn.commit()
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        """Retrieves a persistent configuration value."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row["value"] if row else default
+
+    def is_sync_enabled(self) -> bool:
+        """Returns True if auto-sync is currently enabled (default: True)."""
+        return self.get_setting("sync_enabled", "1") == "1"
+
+    def set_sync_enabled(self, enabled: bool):
+        """Enables or disables auto-syncing."""
+        self.set_setting("sync_enabled", "1" if enabled else "0")
