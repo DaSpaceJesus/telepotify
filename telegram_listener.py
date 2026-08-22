@@ -100,61 +100,6 @@ class TelegramChatListener:
             if not message_text.strip():
                 return
 
-            # Check for admin slash commands (/on, /off, /status) sent directly in chat
-            cmd_lower = message_text.strip().lower()
-            if cmd_lower in ("/off", "/pause", "/stop"):
-                sender = await event.get_sender()
-                sender_id = str(getattr(sender, 'id', ''))
-                sender_name = getattr(sender, 'first_name', 'User')
-                if sender_id in self.telegram_reporter._authorized_ids or sender_id in self._target_chat_ids:
-                    self.state_db.set_sync_enabled(False)
-                    print(f"[TelegramListener] ⏸️ Sync paused by {sender_name} via chat command.")
-                    msg = (
-                        f"⏸️ <b>Telepotify Paused</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Auto-sync has been paused by <b>{sender_name}</b>.\n"
-                        f"New music links sent in chat will not be added to Spotify.\n\n"
-                        f"<i>Send /on or /resume to resume syncing anytime.</i>"
-                    )
-                    for cid in self.telegram_reporter.notify_chat_ids:
-                        await self.telegram_reporter._send_text(cid, msg)
-                    return
-
-            elif cmd_lower in ("/on", "/resume"):
-                sender = await event.get_sender()
-                sender_id = str(getattr(sender, 'id', ''))
-                sender_name = getattr(sender, 'first_name', 'User')
-                if sender_id in self.telegram_reporter._authorized_ids or sender_id in self._target_chat_ids:
-                    self.state_db.set_sync_enabled(True)
-                    print(f"[TelegramListener] ▶️ Sync resumed by {sender_name} via chat command.")
-                    msg = (
-                        f"▶️ <b>Telepotify Active</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Auto-sync has been resumed by <b>{sender_name}</b>.\n"
-                        f"Music links sent in your chat will now be automatically synchronized!"
-                    )
-                    for cid in self.telegram_reporter.notify_chat_ids:
-                        await self.telegram_reporter._send_text(cid, msg)
-                    return
-
-            elif cmd_lower in ("/status", "/info"):
-                sender = await event.get_sender()
-                sender_id = str(getattr(sender, 'id', ''))
-                if sender_id in self.telegram_reporter._authorized_ids or sender_id in self._target_chat_ids:
-                    is_enabled = self.state_db.is_sync_enabled()
-                    status_badge = "🟢 <b>Active (Syncing ON)</b>" if is_enabled else "🔴 <b>Paused (Syncing OFF)</b>"
-                    total = self.spotify_client.get_playlist_total() if self.spotify_client else self.state_db.get_total_active_count()
-                    status_text = (
-                        f"📊 <b>Telepotify Status</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"• <b>Status:</b> {status_badge}\n"
-                        f"• <b>Tracks in Playlist:</b> {total}\n"
-                        f"• <b>Authorized Admins:</b> You & Anna"
-                    )
-                    for cid in self.telegram_reporter.notify_chat_ids:
-                        await self.telegram_reporter._send_text(cid, status_text)
-                    return
-
             await self._process_message(message_text)
 
         print("[TelegramListener] Listening for music links...")

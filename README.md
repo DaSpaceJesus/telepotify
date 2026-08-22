@@ -276,7 +276,7 @@ sudo systemctl start spotify-sync
 
 ## 🤖 Interactive Telegram Commands
 
-Telepotify includes built-in admin controls directly in Telegram. Commands can be sent in your **private DM with `@telepotifybot`** or inside your **chat with Anna**:
+Telepotify includes built-in admin controls directly in Telegram. Commands are sent in your **private DM with `@telepotifybot`**:
 
 > 🔒 **Security Notice**: Commands are strictly protected. Only authorized user IDs defined in `TELEGRAM_NOTIFY_CHAT_IDS` (you and Anna) have permission to run these commands. Any unauthorized attempts are blocked and logged.
 
